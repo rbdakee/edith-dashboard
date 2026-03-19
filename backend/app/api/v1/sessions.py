@@ -1,0 +1,58 @@
+from fastapi import APIRouter, HTTPException, Query, Depends
+
+from app.core.deps import get_current_user
+from app.domain.models import Session, SessionCreate, SessionUpdate
+from app.storage.session_repo import session_repo
+from app.services.session_service import create_session
+
+router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+@router.get("/")
+async def list_sessions(
+    agent_id: str | None = Query(None),
+    task_id: str | None = Query(None),
+    status: str | None = Query(None),
+    limit: int = Query(50, le=200),
+    _user: str = Depends(get_current_user),
+):
+    sessions = await session_repo.list(
+        agent_id=agent_id,
+        task_id=task_id,
+        status=status,
+        limit=limit,
+    )
+    return [s.model_dump(mode="json") for s in sessions]
+
+
+@router.post("/", status_code=201)
+async def create_session_endpoint(
+    data: SessionCreate,
+    _user: str = Depends(get_current_user),
+):
+    session = await create_session(data)
+    return session.model_dump(mode="json")
+
+
+@router.get("/{session_id}")
+async def get_session(
+    session_id: str,
+    _user: str = Depends(get_current_user),
+):
+    session = await session_repo.get(session_id)
+    if session is None:
+        raise HTTPException(404, f"Session {session_id} not found")
+    return session.model_dump(mode="json")
+
+
+@router.patch("/{session_id}")
+async def patch_session(
+    session_id: str,
+    data: SessionUpdate,
+    _user: str = Depends(get_current_user),
+):
+    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    updated = await session_repo.update(session_id, updates)
+    if updated is None:
+        raise HTTPException(404, f"Session {session_id} not found")
+    return updated.model_dump(mode="json")
