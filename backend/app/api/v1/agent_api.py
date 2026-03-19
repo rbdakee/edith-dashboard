@@ -7,11 +7,12 @@ from pathlib import Path
 
 from app.config import settings
 from app.storage.json_store import read_json
-from app.domain.models import TaskCreate, TaskUpdate
+from app.domain.models import TaskCreate, TaskUpdate, TaskExecutionReport
 from app.storage.task_repo import task_repo
 from app.storage.session_repo import session_repo
 from app.storage.comment_repo import comment_repo
 from app.services.task_service import create_task, update_task
+from app.services.task_runtime import apply_execution_outcome
 from app.services.comment_router import mark_delivered
 
 router = APIRouter(prefix="/agent", tags=["agent-api"])
@@ -59,6 +60,29 @@ async def agent_get_task(task_id: str, x_api_key: str = Header()):
     if task is None:
         raise HTTPException(404, f"Task {task_id} not found")
     return task.model_dump(mode="json")
+
+
+@router.post("/tasks/{task_id}/execution-report")
+async def agent_report_task_execution(
+    task_id: str,
+    payload: TaskExecutionReport,
+    x_api_key: str = Header(),
+):
+    _verify_agent_key(x_api_key)
+    updated = await apply_execution_outcome(
+        task_id=task_id,
+        success=payload.success,
+        summary=payload.summary,
+        error=payload.error,
+        main_session_id=payload.main_session_id,
+        executor_session_id=payload.executor_session_id,
+        report_back_session=payload.report_back_session,
+        report_back_channel=payload.report_back_channel,
+        report_back_chat_id=payload.report_back_chat_id,
+    )
+    if updated is None:
+        raise HTTPException(404, f"Task {task_id} not found")
+    return updated.model_dump(mode="json")
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────────

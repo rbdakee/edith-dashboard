@@ -70,7 +70,7 @@ export function TaskCard({ task, onClick }: TaskCardProps) {
           {/* Approve button */}
           {task.status === 'planned' && !task.approved && (
             <div onClick={(e) => e.stopPropagation()}>
-              <ApproveButton taskId={task.id} taskTitle={task.title} />
+              <ApproveButton task={task} />
             </div>
           )}
         </div>

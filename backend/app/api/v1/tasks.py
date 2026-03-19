@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 
 from app.core.deps import get_current_user
-from app.domain.models import Task, TaskCreate, TaskUpdate
+from app.domain.models import Task, TaskCreate, TaskUpdate, ApproveTaskRequest
 from app.storage.task_repo import task_repo
 from app.services.task_service import create_task, update_task, approve_task
 
@@ -74,9 +74,14 @@ async def delete_task(
 @router.post("/{task_id}/approve")
 async def approve_task_endpoint(
     task_id: str,
+    payload: ApproveTaskRequest | None = None,
     _user: str = Depends(get_current_user),
 ):
-    updated = await approve_task(task_id)
+    report_back_context = payload.model_dump(exclude_none=True) if payload else None
+    try:
+        updated = await approve_task(task_id, report_back_context=report_back_context)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     if updated is None:
         raise HTTPException(404, f"Task {task_id} not found")
     return updated.model_dump(mode="json")

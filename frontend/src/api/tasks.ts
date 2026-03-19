@@ -3,6 +3,14 @@ import type { Task } from '@/types';
 
 type TaskListParams = Record<string, string | boolean | null | undefined>;
 
+export interface ApproveTaskPayload {
+  report_back_session?: string;
+  report_back_channel?: string;
+  report_back_chat_id?: string;
+  main_session_id?: string;
+  executor_session_id?: string;
+}
+
 export const tasksApi = {
   list: (params?: TaskListParams) => {
     const search = new URLSearchParams();
@@ -17,5 +25,5 @@ export const tasksApi = {
   create: (data: Partial<Task>) => api.post<Task>('/tasks/', data),
   update: (id: string, data: Partial<Task>) => api.patch<Task>(`/tasks/${id}`, data),
   delete: (id: string) => api.delete<void>(`/tasks/${id}`),
-  approve: (id: string) => api.post<Task>(`/tasks/${id}/approve`),
+  approve: (id: string, payload?: ApproveTaskPayload) => api.post<Task>(`/tasks/${id}/approve`, payload),
 };

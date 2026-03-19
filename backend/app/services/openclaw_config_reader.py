@@ -44,7 +44,9 @@ def read_agents_from_file() -> list[dict[str, Any]] | None:
         return None
 
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        # openclaw.json may be saved with UTF-8 BOM on Windows; use utf-8-sig
+        # so config parsing does not fail and stale dashboard state is not kept.
+        with open(config_path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         return _extract_agents(data)
     except Exception as e:

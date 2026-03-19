@@ -2,6 +2,10 @@ from pydantic_settings import BaseSettings
 from pathlib import Path
 
 
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_PROJECT_DIR = Path(__file__).resolve().parents[2]
+
+
 class Settings(BaseSettings):
     # Auth
     jwt_secret: str = ""
@@ -23,7 +27,14 @@ class Settings(BaseSettings):
     backend_port: int = 18790
     data_dir: str = "./data"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": (
+            str(_BACKEND_DIR / ".env"),
+            str(_PROJECT_DIR / ".env"),
+        ),
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
 
 settings = Settings()

@@ -11,6 +11,7 @@ from app.storage.event_repo import event_repo
 from app.domain.models import Event
 from app.domain.enums import EventSource
 from app.config import settings
+from app.services.task_runtime import apply_execution_outcome
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -23,6 +24,21 @@ class IngestEvent(BaseModel):
     timestamp: datetime | None = None
     data: dict[str, Any] = {}
     title: str | None = None
+
+
+def _is_success_event(event_type: str) -> bool:
+    return event_type in {"task.execution.completed", "task.completed"}
+
+
+def _is_failure_event(event_type: str) -> bool:
+    return event_type in {"task.execution.failed", "task.failed"}
+
+
+def _extract_task_id(event: IngestEvent) -> str | None:
+    if event.task_id:
+        return event.task_id
+    raw = event.data.get("task_id")
+    return raw if isinstance(raw, str) and raw.strip() else None
 
 
 def _get_ingest_key() -> str:
@@ -52,6 +68,21 @@ async def ingest_event(event: IngestEvent, x_api_key: str = Header()):
 
     await event_repo.append(normalized)
     await event_bus.publish(normalized.model_dump(mode="json"))
+
+    task_id = _extract_task_id(event)
+    if task_id and (_is_success_event(event.type) or _is_failure_event(event.type)):
+        await apply_execution_outcome(
+            task_id=task_id,
+            success=_is_success_event(event.type),
+            summary=event.data.get("summary") if isinstance(event.data.get("summary"), str) else event.title,
+            error=event.data.get("error") if isinstance(event.data.get("error"), str) else None,
+            main_session_id=event.data.get("main_session_id") if isinstance(event.data.get("main_session_id"), str) else None,
+            executor_session_id=event.session_id or (event.data.get("executor_session_id") if isinstance(event.data.get("executor_session_id"), str) else None),
+            report_back_session=event.data.get("report_back_session") if isinstance(event.data.get("report_back_session"), str) else None,
+            report_back_channel=event.data.get("report_back_channel") if isinstance(event.data.get("report_back_channel"), str) else None,
+            report_back_chat_id=event.data.get("report_back_chat_id") if isinstance(event.data.get("report_back_chat_id"), str) else None,
+            source=EventSource.hook,
+        )
 
     return {"ok": True, "event_id": normalized.id}
 

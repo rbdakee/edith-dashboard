@@ -87,7 +87,8 @@ class SessionRepository:
         limit: int = 50,
     ) -> list[Session]:
         self._load_index()
-        results = []
+
+        matched_ids: list[str] = []
         for sid, entry in self._index.items():
             if agent_id and entry.get("agent_id") != agent_id:
                 continue
@@ -95,6 +96,22 @@ class SessionRepository:
                 continue
             if status and entry.get("status") != status:
                 continue
+            matched_ids.append(sid)
+
+        def _sort_ts(entry: dict[str, Any]) -> str:
+            # Freshest sessions first: ended_at (if present) else started_at.
+            # Keep string ordering on ISO timestamps for stable descending sort.
+            ended_at = entry.get("ended_at")
+            started_at = entry.get("started_at")
+            return str(ended_at or started_at or "")
+
+        matched_ids.sort(
+            key=lambda sid: _sort_ts(self._index.get(sid, {})),
+            reverse=True,
+        )
+
+        results: list[Session] = []
+        for sid in matched_ids:
             s = await self.get(sid)
             if s:
                 results.append(s)

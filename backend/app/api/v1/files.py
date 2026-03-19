@@ -1,23 +1,42 @@
 """
-File content API — serve file contents from allowed directories.
-Used by the frontend to display file contents in the dashboard.
+File browser/content API — serves real filesystem directories/files from allowed roots.
+Used by the frontend Files page as a real file manager (folders first).
 """
-from fastapi import APIRouter, HTTPException, Query, Depends
+from __future__ import annotations
+
 from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query, Depends
 
 from app.core.deps import get_current_user
 from app.config import settings
 
 router = APIRouter(prefix="/files", tags=["files"])
 
-# Only files within these directories can be served
+
 def _allowed_prefixes() -> list[Path]:
-    prefixes = []
+    """Canonical allowed roots for file browser/content access."""
+    prefixes: list[Path] = []
+
     if settings.openclaw_workspace:
         prefixes.append(Path(settings.openclaw_workspace).resolve())
     if settings.openclaw_dir:
         prefixes.append(Path(settings.openclaw_dir).resolve())
-    return prefixes
+
+    # Dashboard runtime data (artifacts, events, etc.)
+    data_root = Path(settings.data_dir).resolve()
+    prefixes.append(data_root)
+
+    # De-duplicate while preserving order
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for p in prefixes:
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(p)
+    return unique
 
 
 def _is_allowed(path: Path) -> bool:
@@ -29,6 +48,83 @@ def _is_allowed(path: Path) -> bool:
         except ValueError:
             continue
     return False
+
+
+def _guess_mime(p: Path) -> str:
+    ext = p.suffix.lower()
+    mime_map = {
+        ".md": "text/markdown",
+        ".txt": "text/plain",
+        ".py": "text/x-python",
+        ".ts": "text/typescript",
+        ".tsx": "text/typescript",
+        ".js": "text/javascript",
+        ".json": "application/json",
+        ".yaml": "text/yaml",
+        ".yml": "text/yaml",
+        ".toml": "text/toml",
+        ".html": "text/html",
+        ".css": "text/css",
+    }
+    return mime_map.get(ext, "text/plain")
+
+
+@router.get("/roots")
+async def list_roots(_user: str = Depends(get_current_user)):
+    roots = [str(p) for p in _allowed_prefixes() if p.exists()]
+    return {"roots": roots}
+
+
+@router.get("/list")
+async def list_directory(
+    path: str | None = Query(None, description="Directory path to list. Defaults to first allowed root."),
+    _user: str = Depends(get_current_user),
+):
+    roots = [p for p in _allowed_prefixes() if p.exists()]
+    if not roots:
+        return {"path": None, "parent": None, "entries": [], "roots": []}
+
+    if path:
+        current = Path(path)
+    else:
+        current = roots[0]
+
+    if not _is_allowed(current):
+        raise HTTPException(403, "Access to this path is not allowed")
+
+    if not current.exists():
+        raise HTTPException(404, "Directory not found")
+
+    if not current.is_dir():
+        raise HTTPException(400, "Path is not a directory")
+
+    entries: list[dict] = []
+    try:
+        for child in current.iterdir():
+            is_dir = child.is_dir()
+            size = None if is_dir else child.stat().st_size
+            entries.append({
+                "name": child.name,
+                "path": str(child.resolve()),
+                "is_dir": is_dir,
+                "size": size,
+                "mime_type": None if is_dir else _guess_mime(child),
+            })
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+
+    # Folders first, then files; then alphabetical (case-insensitive)
+    entries.sort(key=lambda e: (not e["is_dir"], str(e["name"]).lower()))
+
+    parent = current.parent
+    parent_path = str(parent) if parent != current and _is_allowed(parent) else None
+
+    return {
+        "path": str(current.resolve()),
+        "parent": parent_path,
+        "entries": entries,
+        "roots": [str(p) for p in roots],
+    }
 
 
 @router.get("/content")
@@ -54,28 +150,11 @@ async def get_file_content(
         raise HTTPException(413, "File too large (max 1MB)")
 
     content = p.read_text(encoding="utf-8", errors="replace")
-    ext = p.suffix.lower()
-
-    mime_map = {
-        ".md": "text/markdown",
-        ".txt": "text/plain",
-        ".py": "text/x-python",
-        ".ts": "text/typescript",
-        ".tsx": "text/typescript",
-        ".js": "text/javascript",
-        ".json": "application/json",
-        ".yaml": "text/yaml",
-        ".yml": "text/yaml",
-        ".toml": "text/toml",
-        ".html": "text/html",
-        ".css": "text/css",
-    }
-    mime_type = mime_map.get(ext, "text/plain")
 
     return {
         "content": content,
         "path": str(p),
         "filename": p.name,
         "size": size,
-        "mime_type": mime_type,
+        "mime_type": _guess_mime(p),
     }

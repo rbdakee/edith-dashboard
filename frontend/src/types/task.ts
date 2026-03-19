@@ -18,6 +18,7 @@ export interface Task {
   parent_task_id: string | null;
   approved: boolean;
   approved_at: string | null;
+  runtime_metadata?: Record<string, unknown>;
   created_at: string;
   updated_at: string;
   last_activity_at: string;

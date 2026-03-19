@@ -9,6 +9,7 @@ Flow:
 """
 import asyncio
 import logging
+from typing import Optional, Tuple
 
 import httpx
 
@@ -22,24 +23,48 @@ RETRY_BACKOFF = [1.0, 2.0]  # seconds between retries
 
 
 def _build_agent_message(task: Task) -> str:
+    """
+    Stable dashboard -> main approval contract (v1).
+
+    Design goals:
+    - Explicit task_id for context recovery in any session
+    - Compact, line-oriented format (human + machine friendly)
+    - Durable keys for downstream parsing
+    """
+    metadata = (task.runtime_metadata or {}).get("dashboard_approval", {})
     return (
-        "[DASHBOARD TASK APPROVED]\n"
-        f"Task ID: {task.id}\n"
-        f"Title: {task.title}\n"
-        f"Priority: {task.priority}\n"
-        f"Executor Agent: {task.executor_agent or 'not assigned'}\n"
-        f"Plan: {task.plan or 'no plan provided'}\n"
-        f"Description: {task.description or 'no description'}\n"
-        "\n"
-        "This task was approved via the dashboard UI. "
-        "Read the full task context from the Dashboard API if needed, "
-        "then delegate execution to the appropriate agent according to the plan. "
-        "Report results back when complete."
+        f"Approve Task: {task.title}\n"
+        "contract: dashboard.approval.v1\n"
+        f"task_id: {task.id}\n"
+        f"title: {task.title}\n"
+        f"priority: {task.priority}\n"
+        f"executor_agent: {task.executor_agent or 'unassigned'}\n"
+        f"plan: {task.plan or '-'}\n"
+        f"description: {task.description or '-'}\n"
+        f"report_back_session: {metadata.get('report_back_session') or 'unknown'}\n"
+        f"report_back_channel: {metadata.get('report_back_channel') or 'unknown'}\n"
+        f"report_back_chat_id: {metadata.get('report_back_chat_id') or 'unknown'}\n"
+        f"main_session_id: {metadata.get('main_session_id') or 'unknown'}\n"
+        f"executor_session_id: {metadata.get('executor_session_id') or 'unknown'}\n"
+        "execution_context_required: true\n"
+        "source: dashboard_ui\n"
+        "action: fetch_task_context_by_id_and_execute"
     )
 
 
-async def _post_to_gateway(task: Task) -> bool:
-    """POST chat completion to Gateway. Returns True on success."""
+async def _post_to_gateway(task: Task) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    POST chat completion to Gateway.
+
+    Returns:
+      (success, failure_kind, failure_detail)
+    where failure_kind is one of:
+      - auth: 401/403 from Gateway
+      - timeout: request timed out
+      - network: request could not reach Gateway
+      - http: non-auth HTTP error from Gateway
+      - unknown: unexpected failure
+    """
     url = f"{settings.openclaw_gateway_url}/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {settings.openclaw_gateway_token}",
@@ -62,16 +87,57 @@ async def _post_to_gateway(task: Task) -> bool:
                     "Gateway webhook succeeded for task %s (attempt %d)",
                     task.id, attempt + 1,
                 )
-                return True
-        except Exception as exc:
+                return True, None, None
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            detail = f"HTTP {status_code}: {exc.response.text[:300]}"
+            if status_code in (401, 403):
+                logger.error(
+                    "Gateway auth failed for task %s (attempt %d): %s",
+                    task.id, attempt + 1, detail,
+                )
+                return False, "auth", detail
+
             logger.warning(
-                "Gateway webhook attempt %d/%d failed for task %s: %s",
-                attempt + 1, MAX_RETRIES + 1, task.id, exc,
+                "Gateway webhook HTTP error attempt %d/%d for task %s: %s",
+                attempt + 1, MAX_RETRIES + 1, task.id, detail,
             )
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_BACKOFF[attempt])
+            else:
+                return False, "http", detail
+        except httpx.TimeoutException as exc:
+            detail = str(exc)
+            logger.warning(
+                "Gateway webhook timeout attempt %d/%d for task %s: %s",
+                attempt + 1, MAX_RETRIES + 1, task.id, detail,
+            )
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_BACKOFF[attempt])
+            else:
+                return False, "timeout", detail
+        except httpx.RequestError as exc:
+            detail = str(exc)
+            logger.warning(
+                "Gateway webhook network error attempt %d/%d for task %s: %s",
+                attempt + 1, MAX_RETRIES + 1, task.id, detail,
+            )
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_BACKOFF[attempt])
+            else:
+                return False, "network", detail
+        except Exception as exc:
+            detail = str(exc)
+            logger.warning(
+                "Gateway webhook unexpected error attempt %d/%d for task %s: %s",
+                attempt + 1, MAX_RETRIES + 1, task.id, detail,
+            )
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_BACKOFF[attempt])
+            else:
+                return False, "unknown", detail
 
-    return False
+    return False, "unknown", "retries exhausted"
 
 
 async def _rollback_task(task_id: str):
@@ -95,11 +161,36 @@ async def trigger_approval_hook(task: Task):
     """
     logger.info("Triggering approval hook for task %s (%s)", task.id, task.title)
 
-    success = await _post_to_gateway(task)
+    approval_context = (task.runtime_metadata or {}).get("dashboard_approval", {})
+    if not approval_context.get("report_back_session") or not approval_context.get("report_back_channel"):
+        logger.error("Missing mandatory report-back context for task %s", task.id)
+        await _rollback_task(task.id)
+        try:
+            from app.services.event_service import emit_event
+            from app.domain.enums import EventSource
+
+            await emit_event(
+                "task.approval_context_missing",
+                title=(
+                    f"⚠️ Approve failed for '{task.title}' — missing report-back target. "
+                    "Task returned to Planned."
+                ),
+                task_id=task.id,
+                agent_id=task.executor_agent,
+                source=EventSource.system,
+                data={"rollback_to": "planned", "missing": ["report_back_session", "report_back_channel"]},
+            )
+        except Exception as exc:
+            logger.error("Failed to emit missing-context event: %s", exc)
+        return
+
+    success, failure_kind, failure_detail = await _post_to_gateway(task)
 
     if not success:
         logger.error(
-            "All webhook retries exhausted for task %s — rolling back", task.id
+            "Webhook failed for task %s (%s) — rolling back",
+            task.id,
+            failure_kind,
         )
         await _rollback_task(task.id)
 
@@ -108,17 +199,31 @@ async def trigger_approval_hook(task: Task):
             from app.services.event_service import emit_event
             from app.domain.enums import EventSource
 
+            is_auth_failure = failure_kind == "auth"
+            failure_message = (
+                "Gateway webhook rejected credentials (401/403)"
+                if is_auth_failure
+                else "Gateway webhook unreachable after retries"
+            )
+            title_suffix = (
+                "agent auth failed"
+                if is_auth_failure
+                else "could not reach agent runtime"
+            )
+
             await emit_event(
                 "task.webhook_failed",
                 title=(
                     f"⚠️ Approve failed for '{task.title}' — "
-                    "could not reach agent runtime. Task returned to Planned."
+                    f"{title_suffix}. Task returned to Planned."
                 ),
                 task_id=task.id,
                 agent_id=task.executor_agent,
                 source=EventSource.system,
                 data={
-                    "error": "Gateway webhook unreachable after retries",
+                    "error": failure_message,
+                    "failure_kind": failure_kind,
+                    "failure_detail": failure_detail,
                     "rollback_to": "planned",
                 },
             )

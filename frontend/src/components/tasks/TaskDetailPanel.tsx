@@ -83,7 +83,7 @@ export function TaskDetailPanel({ task, onClose }: TaskDetailPanelProps) {
         </div>
         <div className="flex items-center gap-2">
           {task.status === 'planned' && !task.approved && (
-            <ApproveButton taskId={task.id} taskTitle={task.title} />
+            <ApproveButton task={task} />
           )}
           <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7">
             <X className="h-4 w-4" />

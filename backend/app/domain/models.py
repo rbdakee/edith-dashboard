@@ -32,6 +32,7 @@ class TaskCreate(BaseModel):
     context_file: str | None = None
     parent_task_id: str | None = None
     notion_id: str | None = None
+    runtime_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskUpdate(BaseModel):
@@ -48,6 +49,26 @@ class TaskUpdate(BaseModel):
     parent_task_id: str | None = None
     notion_id: str | None = None
     approved: bool | None = None
+    runtime_metadata: dict[str, Any] | None = None
+
+
+class ApproveTaskRequest(BaseModel):
+    report_back_session: str | None = None
+    report_back_channel: str | None = None
+    report_back_chat_id: str | None = None
+    main_session_id: str | None = None
+    executor_session_id: str | None = None
+
+
+class TaskExecutionReport(BaseModel):
+    success: bool
+    summary: str | None = None
+    error: str | None = None
+    main_session_id: str | None = None
+    executor_session_id: str | None = None
+    report_back_session: str | None = None
+    report_back_channel: str | None = None
+    report_back_chat_id: str | None = None
 
 
 class Task(BaseModel):
@@ -66,6 +87,7 @@ class Task(BaseModel):
     parent_task_id: str | None = None
     approved: bool = False
     approved_at: datetime | None = None
+    runtime_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
     last_activity_at: datetime = Field(default_factory=_now)
