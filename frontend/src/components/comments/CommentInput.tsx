@@ -11,18 +11,15 @@ interface CommentInputProps {
   onSubmitted?: () => void;
 }
 
-const AGENT_OPTIONS = [
-  { value: 'main', label: 'E.D.I.T.H. (Main)' },
-  { value: 'edith-dev', label: 'E.D.I.T.H. Dev' },
-  { value: 'edith-routine', label: 'E.D.I.T.H. Routine' },
-  { value: 'edith-analytics', label: 'E.D.I.T.H. Analytics' },
-];
+// Agent options are now dynamic from agentStore
+import { useAgentStore } from '@/stores/agentStore';
 
 export function CommentInput({ taskId, onSubmitted }: CommentInputProps) {
   const [content, setContent] = useState('');
   const [routedTo, setRoutedTo] = useState('');
   const [loading, setLoading] = useState(false);
   const queryClient = useQueryClient();
+  const { agents } = useAgentStore();
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -66,8 +63,8 @@ export function CommentInput({ taskId, onSubmitted }: CommentInputProps) {
               <SelectValue placeholder="Select agent..." />
             </SelectTrigger>
             <SelectContent>
-              {AGENT_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+              {agents.map((agent) => (
+                <SelectItem key={agent.id} value={agent.id}>{agent.name}</SelectItem>
               ))}
             </SelectContent>
           </Select>

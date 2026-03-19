@@ -65,6 +65,7 @@ class TaskRepository:
         executor_agent: str | None = None,
         project_id: str | None = None,
         parent_task_id: str | None = None,
+        top_level_only: bool = False,
     ) -> list[Task]:
         self._load_index()
         results = []
@@ -76,6 +77,8 @@ class TaskRepository:
             if executor_agent and entry.get("executor_agent") != executor_agent:
                 continue
             if project_id and entry.get("project_id") != project_id:
+                continue
+            if top_level_only and entry.get("parent_task_id") is not None:
                 continue
             if parent_task_id is not None and entry.get("parent_task_id") != parent_task_id:
                 continue

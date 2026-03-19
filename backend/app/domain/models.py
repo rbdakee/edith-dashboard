@@ -154,6 +154,7 @@ class AgentUpdate(BaseModel):
     status: AgentStatus | None = None
     current_task_id: str | None = None
     current_session_id: str | None = None
+    current_session_context: dict[str, Any] | None = None
     last_active_at: datetime | None = None
 
 
@@ -164,6 +165,7 @@ class Agent(BaseModel):
     status: AgentStatus = AgentStatus.idle
     current_task_id: str | None = None
     current_session_id: str | None = None
+    current_session_context: dict[str, Any] | None = None
     skills: list[str] = Field(default_factory=list)
     last_active_at: datetime | None = None
 

@@ -1,9 +1,16 @@
 import { api } from './client';
 import type { Task } from '@/types';
 
+type TaskListParams = Record<string, string | boolean | null | undefined>;
+
 export const tasksApi = {
-  list: (params?: Record<string, string>) => {
-    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+  list: (params?: TaskListParams) => {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params ?? {})) {
+      if (value === undefined || value === null || value === '') continue;
+      search.set(key, String(value));
+    }
+    const qs = search.size > 0 ? `?${search.toString()}` : '';
     return api.get<Task[]>(`/tasks/${qs}`);
   },
   get: (id: string) => api.get<Task>(`/tasks/${id}`),

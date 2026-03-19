@@ -7,6 +7,7 @@ from typing import Any
 from app.domain.models import Session
 from app.storage.json_store import read_json, write_json
 from app.config import settings
+from app.services.session_metadata import normalize_session_snapshot, resolve_session_identity
 
 
 class SessionRepository:
@@ -67,6 +68,14 @@ class SessionRepository:
                 self._save_index()
             return None
 
+        normalized_snapshot = normalize_session_snapshot(
+            openclaw_session_ref=raw.get("openclaw_session_id"),
+            snapshot=raw.get("context_snapshot"),
+        )
+        if normalized_snapshot != raw.get("context_snapshot"):
+            raw["context_snapshot"] = normalized_snapshot
+            write_json(path, raw)
+
         self._cache[session_id] = raw
         return Session(**raw)
 
@@ -116,11 +125,55 @@ class SessionRepository:
         return updated
 
     async def find_by_openclaw_id(self, openclaw_session_id: str) -> Session | None:
-        """Find a session by its OpenClaw session ID (UUID or session key)."""
+        """Find a session by its exact stored OpenClaw session ID."""
         self._load_index()
         for sid in list(self._index.keys()):
             s = await self.get(sid)
             if s and s.openclaw_session_id == openclaw_session_id:
+                return s
+        return None
+
+    async def find_by_openclaw_refs(self, *refs: str | None) -> Session | None:
+        """Find a session by any exact/aliased OpenClaw reference.
+
+        Matches against stored `openclaw_session_id` plus normalized snapshot aliases
+        (`session_key` / `session_id`) so sessionKey-vs-sessionId duplicates collapse
+        onto a single dashboard row.
+        """
+        self._load_index()
+
+        exact_refs = {ref.strip() for ref in refs if isinstance(ref, str) and ref.strip()}
+        if not exact_refs:
+            return None
+
+        canonical_refs = {
+            canonical.strip()
+            for canonical, _meta in (resolve_session_identity(ref) for ref in exact_refs)
+            if isinstance(canonical, str) and canonical.strip()
+        }
+        wanted_refs = exact_refs | canonical_refs
+
+        for sid in list(self._index.keys()):
+            s = await self.get(sid)
+            if not s:
+                continue
+
+            snapshot = s.context_snapshot or {}
+            stored_refs = {
+                value.strip()
+                for value in (
+                    s.openclaw_session_id,
+                    snapshot.get("session_key"),
+                    snapshot.get("session_id"),
+                )
+                if isinstance(value, str) and value.strip()
+            }
+            stored_canonical_refs = {
+                canonical.strip()
+                for canonical, _meta in (resolve_session_identity(ref) for ref in stored_refs)
+                if isinstance(canonical, str) and canonical.strip()
+            }
+            if stored_refs & wanted_refs or stored_canonical_refs & wanted_refs:
                 return s
         return None
 

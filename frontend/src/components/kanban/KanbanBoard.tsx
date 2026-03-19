@@ -20,11 +20,18 @@ const STATUSES: TaskStatus[] = ['idea', 'planned', 'in_progress', 'done', 'archi
 interface KanbanBoardProps {
   tasks: Task[];
   onTaskClick: (task: Task) => void;
-  filterAgent: string;
-  filterPriority: string;
+  filterAgent?: string;
+  filterPriority?: string;
+  queryKey?: unknown[];
 }
 
-export function KanbanBoard({ tasks, onTaskClick, filterAgent, filterPriority }: KanbanBoardProps) {
+export function KanbanBoard({
+  tasks,
+  onTaskClick,
+  filterAgent = '',
+  filterPriority = '',
+  queryKey = ['tasks'],
+}: KanbanBoardProps) {
   const [activeTask, setActiveTask] = useState<Task | null>(null);
   const queryClient = useQueryClient();
 
@@ -62,17 +69,20 @@ export function KanbanBoard({ tasks, onTaskClick, filterAgent, filterPriority }:
     if (!task || task.status === newStatus) return;
 
     // Optimistic update
-    queryClient.setQueryData<Task[]>(['tasks'], (old = []) =>
+    queryClient.setQueryData<Task[]>(queryKey, (old = []) =>
       old.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t))
     );
 
     try {
       await tasksApi.update(taskId, { status: newStatus });
+      await queryClient.invalidateQueries({ queryKey });
+      await queryClient.invalidateQueries({ queryKey: ['tasks'] });
     } catch {
       // Revert on error
+      queryClient.invalidateQueries({ queryKey });
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
     }
-  }, [tasks, queryClient]);
+  }, [tasks, queryClient, queryKey]);
 
   return (
     <DndContext

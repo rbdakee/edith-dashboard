@@ -30,6 +30,21 @@ async def _poll_gateway():
     except Exception as e:
         print(f"[gateway_poller] reconcile error: {e}")
 
+    # Periodic agent config sync
+    await _sync_agents()
+
+
+async def _sync_agents():
+    """Sync agent definitions from OpenClaw config."""
+    try:
+        from app.storage.agent_repo import agent_repo
+        stats = await agent_repo.sync_from_config()
+        # Only log if something actually changed
+        if stats.get("added") or stats.get("removed") or stats.get("updated"):
+            print(f"[gateway_poller] agent sync: {stats}")
+    except Exception as e:
+        print(f"[gateway_poller] agent sync error: {e}")
+
 
 def start_gateway_poller(event_bus, gateway_url: str, gateway_token: str, openclaw_dir: str):
     # event_bus/gateway_url/gateway_token kept in signature for backward compatibility

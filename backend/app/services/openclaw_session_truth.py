@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 from app.storage.session_repo import session_repo
+from app.services.session_metadata import resolve_session_identity
 
 
 def _extract_session_id_from_lock(lock_path: Path) -> str | None:
@@ -69,37 +72,51 @@ def active_openclaw_identifiers(openclaw_dir: str) -> set[str]:
     return active_identifiers
 
 
-async def reconcile_sessions_with_openclaw_truth(
-    openclaw_dir: str,
-    stale_seconds: int = 30,
-) -> dict[str, int]:
-    """
-    Close dashboard-active sessions that are not active in real OpenClaw locks map.
-    Uses a small grace period to avoid transient lock races.
-    """
-    active_identifiers = active_openclaw_identifiers(openclaw_dir)
-    active_rows = await session_repo.list(status='active', limit=1000)
+def _row_identity_candidates(row) -> set[str]:
+    snapshot = row.context_snapshot or {}
+    refs = {
+        value.strip()
+        for value in (
+            row.openclaw_session_id,
+            snapshot.get('session_key'),
+            snapshot.get('session_id'),
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    canonical_refs = {
+        canonical.strip()
+        for canonical, _meta in (resolve_session_identity(ref) for ref in refs)
+        if isinstance(canonical, str) and canonical and canonical.strip()
+    }
+    return refs | canonical_refs
 
-    now = datetime.now(timezone.utc)
-    closed = 0
-    kept = 0
 
-    for row in active_rows:
-        oid = (row.openclaw_session_id or '').strip()
-        if oid and oid in active_identifiers:
-            kept += 1
-            continue
+def _preferred_row_identity(row) -> str | None:
+    snapshot = row.context_snapshot or {}
+    for candidate in (
+        snapshot.get('session_key'),
+        row.openclaw_session_id,
+        snapshot.get('session_id'),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            canonical, _meta = resolve_session_identity(candidate)
+            if isinstance(canonical, str) and canonical.strip():
+                return canonical.strip()
+            return candidate.strip()
+    return None
 
-        started_at = row.started_at
-        age_seconds = 0.0
-        if isinstance(started_at, datetime):
-            base = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
-            age_seconds = (now - base).total_seconds()
 
-        if age_seconds < stale_seconds:
-            kept += 1
-            continue
+def _row_age_seconds(row, now: datetime) -> float:
+    started_at = row.started_at
+    if not isinstance(started_at, datetime):
+        return 0.0
+    base = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - base).total_seconds())
 
+
+async def _close_rows(rows: Iterable, now: datetime, reason: str) -> int:
+    count = 0
+    for row in rows:
         await session_repo.update(
             row.id,
             {
@@ -108,10 +125,65 @@ async def reconcile_sessions_with_openclaw_truth(
                 'context_snapshot': {
                     **(row.context_snapshot or {}),
                     'auto_closed_by': 'openclaw_truth_reconcile',
+                    'terminal_reason': reason,
                 },
             },
         )
-        closed += 1
+        count += 1
+    return count
+
+
+async def reconcile_sessions_with_openclaw_truth(
+    openclaw_dir: str,
+    stale_seconds: int = 30,
+) -> dict[str, int]:
+    """
+    Close dashboard-active sessions that are not active in real OpenClaw locks map.
+    Also collapses duplicate active rows that point at the same live OpenClaw session,
+    keeping only the newest dashboard row as the active representative.
+    """
+    active_identifiers = active_openclaw_identifiers(openclaw_dir)
+    active_rows = await session_repo.list(status='active', limit=1000)
+
+    now = datetime.now(timezone.utc)
+    active_groups: dict[str, list] = defaultdict(list)
+    rows_to_close = []
+    closed = 0
+    kept = 0
+
+    for row in active_rows:
+        row_refs = _row_identity_candidates(row)
+        is_live = bool(row_refs & active_identifiers)
+        if is_live:
+            group_key = _preferred_row_identity(row) or row.id
+            active_groups[group_key].append(row)
+            continue
+
+        if _row_age_seconds(row, now) < stale_seconds:
+            kept += 1
+            continue
+
+        rows_to_close.append((row, 'missing_from_openclaw_truth'))
+
+    for _group_key, group_rows in active_groups.items():
+        if len(group_rows) == 1:
+            kept += 1
+            continue
+
+        ordered = sorted(
+            group_rows,
+            key=lambda row: (
+                getattr(row, 'started_at', now),
+                row.id,
+            ),
+            reverse=True,
+        )
+        kept += 1
+        for duplicate in ordered[1:]:
+            rows_to_close.append((duplicate, 'superseded_duplicate_active_row'))
+
+    for row, reason in rows_to_close:
+        closed += await _close_rows([row], now, reason)
 
     return {
         'active_truth_identifiers': len(active_identifiers),

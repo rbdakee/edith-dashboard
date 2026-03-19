@@ -15,6 +15,7 @@ async def list_tasks(
     executor_agent: str | None = Query(None),
     project_id: str | None = Query(None),
     parent_task_id: str | None = Query(None),
+    include_subtasks: bool = Query(False),
     _user: str = Depends(get_current_user),
 ):
     tasks = await task_repo.list(
@@ -23,6 +24,7 @@ async def list_tasks(
         executor_agent=executor_agent,
         project_id=project_id,
         parent_task_id=parent_task_id,
+        top_level_only=parent_task_id is None and not include_subtasks,
     )
     return [t.model_dump(mode="json") for t in tasks]
 

@@ -9,63 +9,33 @@ from app.domain.enums import AgentStatus
 from app.storage.json_store import read_json, write_json
 from app.config import settings
 
-# Seed data from CLAUDE.md section E
-AGENT_SEED = [
-    {
-        "id": "main",
-        "name": "E.D.I.T.H.",
-        "model": "openai-codex/gpt-5.4",
-        "skills": ["orchestrator", "memory-manager", "activity-logger"],
+# Emergency fallback: used ONLY when OpenClaw config is unreachable AND state.json doesn't exist.
+# In normal operation, agent list is synced from openclaw.json.
+AGENT_SEED: list[dict[str, Any]] = []
+
+# Fields owned by OpenClaw config (always overwritten on sync)
+_CONFIG_OWNED_FIELDS = {"id", "name", "model", "skills"}
+
+# Fields owned by dashboard (preserved during sync)
+_DASHBOARD_OWNED_FIELDS = {
+    "status", "current_task_id", "current_session_id",
+    "current_session_context", "last_active_at",
+}
+
+
+def _idle_defaults() -> dict[str, Any]:
+    """Default dashboard-owned fields for a new agent."""
+    return {
         "status": "idle",
         "current_task_id": None,
         "current_session_id": None,
+        "current_session_context": None,
         "last_active_at": None,
-    },
-    {
-        "id": "edith-routine",
-        "name": "E.D.I.T.H. Routine",
-        "model": "openai-codex/gpt-5.1-codex-mini",
-        "skills": ["task-manager", "notion-task-manager", "notion-finance-analyst", "notion-fitness-analyst", "prayer-times"],
-        "status": "idle",
-        "current_task_id": None,
-        "current_session_id": None,
-        "last_active_at": None,
-    },
-    {
-        "id": "edith-dev",
-        "name": "E.D.I.T.H. Dev",
-        "model": "openai-codex/gpt-5.3-codex",
-        "skills": ["backend-dev", "frontend-dev", "designer", "project-planner", "autonomous-builder", "git-manager"],
-        "status": "idle",
-        "current_task_id": None,
-        "current_session_id": None,
-        "last_active_at": None,
-    },
-    {
-        "id": "edith-analytics",
-        "name": "E.D.I.T.H. Analytics",
-        "model": "openai-codex/gpt-5.1-codex-mini",
-        "skills": ["data-analytics"],
-        "status": "idle",
-        "current_task_id": None,
-        "current_session_id": None,
-        "last_active_at": None,
-    },
-    {
-        "id": "edith-orchestrator",
-        "name": "E.D.I.T.H. Orchestrator",
-        "model": "openai-codex/gpt-5.3-codex",
-        "skills": ["orchestrator", "project-planner", "activity-logger", "memory-manager"],
-        "status": "idle",
-        "current_task_id": None,
-        "current_session_id": None,
-        "last_active_at": None,
-    },
-]
+    }
 
 
 class AgentRepository:
-    """JSON-backed agent repository. All agents stored in agents/state.json."""
+    """JSON-backed agent repository. Syncs agent definitions from OpenClaw config."""
 
     def __init__(self):
         self._agents: dict[str, dict] = {}
@@ -79,15 +49,74 @@ class AgentRepository:
             return
         raw = read_json(self._state_path())
         if raw is None:
-            # Seed from defaults
+            # No state.json — use AGENT_SEED as emergency fallback
             self._agents = {a["id"]: a for a in AGENT_SEED}
-            self._save()
+            if self._agents:
+                self._save()
         else:
-            self._agents = raw if isinstance(raw, dict) else {a["id"]: a for a in (raw if isinstance(raw, list) else AGENT_SEED)}
+            self._agents = raw if isinstance(raw, dict) else {
+                a["id"]: a for a in (raw if isinstance(raw, list) else AGENT_SEED)
+            }
         self._loaded = True
 
     def _save(self):
         write_json(self._state_path(), self._agents)
+
+    async def sync_from_config(self) -> dict[str, Any]:
+        """
+        Sync agent list from OpenClaw config.
+        Returns stats: {added: [...], removed: [...], updated: [...], source: str}
+        """
+        from app.services.openclaw_config_reader import get_agent_definitions
+
+        agents_from_config = await get_agent_definitions()
+        if agents_from_config is None:
+            return {"added": [], "removed": [], "updated": [], "source": "unavailable"}
+
+        # Ensure state is loaded first
+        self._load()
+
+        stats: dict[str, Any] = {"added": [], "removed": [], "updated": [], "source": "openclaw_config"}
+        config_ids = {a["id"] for a in agents_from_config}
+
+        # Add new / update existing agents
+        for config_agent in agents_from_config:
+            agent_id = config_agent["id"]
+            if agent_id in self._agents:
+                # Update config-owned fields, preserve dashboard-owned
+                existing = self._agents[agent_id]
+                changed = False
+                for field in _CONFIG_OWNED_FIELDS:
+                    if field in config_agent and existing.get(field) != config_agent[field]:
+                        existing[field] = config_agent[field]
+                        changed = True
+                if changed:
+                    stats["updated"].append(agent_id)
+            else:
+                # New agent from config
+                new_agent = {**config_agent, **_idle_defaults()}
+                self._agents[agent_id] = new_agent
+                stats["added"].append(agent_id)
+
+        # Remove agents no longer in config
+        removed_ids = [aid for aid in self._agents if aid not in config_ids]
+        for aid in removed_ids:
+            del self._agents[aid]
+            stats["removed"].append(aid)
+
+        # Save if anything changed
+        if stats["added"] or stats["removed"] or stats["updated"]:
+            self._save()
+            changes = []
+            if stats["added"]:
+                changes.append(f"added={stats['added']}")
+            if stats["removed"]:
+                changes.append(f"removed={stats['removed']}")
+            if stats["updated"]:
+                changes.append(f"updated={stats['updated']}")
+            print(f"[agent_repo] Config sync: {', '.join(changes)}")
+
+        return stats
 
     async def get(self, agent_id: str) -> Agent | None:
         self._load()
@@ -111,8 +140,13 @@ class AgentRepository:
         return Agent(**self._agents[agent_id])
 
     async def seed_if_empty(self):
-        """Ensure agents are seeded on first startup."""
-        self._load()
+        """Sync from config on startup, fallback to seed if needed."""
+        stats = await self.sync_from_config()
+        if stats["source"] == "unavailable":
+            # Config unavailable — just load from state.json or seed
+            self._load()
+            if not self._agents:
+                print("[agent_repo] WARNING: No config source and no state.json. Using empty agent list.")
 
 
 agent_repo = AgentRepository()

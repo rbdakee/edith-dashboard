@@ -7,6 +7,7 @@ from app.domain.models import Task, TaskCreate, TaskUpdate
 from app.domain.enums import TaskStatus, EventSource
 from app.storage.task_repo import task_repo
 from app.services.event_service import emit_event
+from app.services.task_approval_hook import schedule_approval_hook
 from app.config import settings
 
 
@@ -44,6 +45,16 @@ async def update_task(task_id: str, data: TaskUpdate) -> Task | None:
         )
         await task_repo.update(task_id, {"last_status_change_at": datetime.now(timezone.utc).isoformat()})
 
+    # Trigger approval hook if task just became approved + in_progress via PATCH
+    _newly_approved = (
+        "approved" in updates
+        and updates["approved"] is True
+        and not old_task.approved
+    )
+    _is_in_progress = updated.status == TaskStatus.in_progress
+    if _newly_approved and _is_in_progress:
+        schedule_approval_hook(updated)
+
     return updated
 
 
@@ -51,6 +62,10 @@ async def approve_task(task_id: str) -> Task | None:
     task = await task_repo.get(task_id)
     if task is None:
         return None
+
+    # Idempotency: skip if already approved and in_progress
+    if task.approved and task.status == TaskStatus.in_progress:
+        return task
 
     now = datetime.now(timezone.utc)
     updates = {
@@ -76,6 +91,9 @@ async def approve_task(task_id: str) -> Task | None:
     # Write pickup file for agent
     if updated.executor_agent:
         _write_approval_pickup(updated, now)
+
+    # Trigger Gateway webhook to start agent session
+    schedule_approval_hook(updated)
 
     return updated
 

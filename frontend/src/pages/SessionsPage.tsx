@@ -23,6 +23,19 @@ const STATUS_COLORS: Record<Session['status'], string> = {
   cancelled: 'text-gray-500',
 };
 
+function getSessionSourceLabel(session: Session): string {
+  const sourceKind = String(session.context_snapshot?.source_kind ?? '').trim();
+  const channel = String(session.context_snapshot?.channel ?? '').trim();
+
+  if (sourceKind === 'channel') return channel ? `channel:${channel}` : 'channel';
+  if (sourceKind === 'internal') return channel ? `internal:${channel}` : 'internal';
+  if (sourceKind === 'agent') return 'agent';
+
+  const legacySource = String(session.context_snapshot?.source ?? '').trim();
+  if (legacySource) return legacySource;
+  return 'unknown';
+}
+
 export function SessionsPage() {
   const [selected, setSelected] = useState<Session | null>(null);
 
@@ -74,6 +87,9 @@ export function SessionsPage() {
                     {session.task_id && (
                       <span>task: <span className="text-blue-400 font-mono">{session.task_id.slice(0, 8)}</span></span>
                     )}
+                    <span className="px-1.5 py-0.5 rounded bg-gray-800 text-gray-300">
+                      {getSessionSourceLabel(session)}
+                    </span>
                     <span className="flex items-center gap-1">
                       <Clock className="h-3 w-3" />
                       {formatDuration(session.started_at, session.ended_at)}
@@ -110,6 +126,10 @@ export function SessionsPage() {
               <div>
                 <div className="text-xs text-gray-500 mb-1">Model</div>
                 <span className="text-gray-300 font-mono text-xs">{selected.model}</span>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-1">Source</div>
+                <span className="text-gray-300 text-xs">{getSessionSourceLabel(selected)}</span>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">Duration</div>

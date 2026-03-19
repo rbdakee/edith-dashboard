@@ -12,6 +12,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 
+from app.services.session_metadata import classify_session_source, resolve_session_identity
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -27,6 +28,9 @@ _file_snapshots: dict[str, str] = {}
 # If a session file has no .lock and has been quiet for this long, treat as finished.
 _SESSION_STALE_SECONDS = 30
 
+# Set in start_file_watcher; used to resolve sessionKey <-> sessionId aliases.
+_OPENCLAW_DIR: str | None = None
+
 
 def _parse_session_key(session_key: str) -> str | None:
     """Extract agent_id from sessionKey like 'agent:main:telegram:direct:893220231'."""
@@ -34,6 +38,17 @@ def _parse_session_key(session_key: str) -> str | None:
     if len(parts) >= 2 and parts[0] == "agent":
         return parts[1]
     return None
+
+
+def _resolve_session_identity(session_ref: str) -> tuple[str, dict]:
+    """Resolve OpenClaw session reference to canonical id + metadata."""
+    canonical, meta = resolve_session_identity(session_ref, openclaw_dir=_OPENCLAW_DIR)
+    return canonical or session_ref, meta
+
+
+def _classify_session_source(source: str, session_key: str, meta: dict) -> tuple[str, str | None]:
+    """Return canonical (source_kind, channel)."""
+    return classify_session_source(source=source, session_key=session_key, meta=meta)
 
 
 class WorkspaceEventHandler(FileSystemEventHandler):
@@ -72,7 +87,10 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         if is_deleted:
             etype = "session.completed"
         elif is_new:
-            etype = "session.started"
+            # Keep event stream de-duplicated: do not emit "session.started" here,
+            # but ensure the session row exists even if commands.log did not emit this source.
+            self._create_session(agent_id, openclaw_session_id, datetime.now(timezone.utc).isoformat(), "openclaw")
+            return
         else:
             # Heuristic for sessions that finish without .deleted/.reset rename:
             # if .jsonl has no lock and hasn't changed for a short grace period,
@@ -100,10 +118,7 @@ class WorkspaceEventHandler(FileSystemEventHandler):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        if is_new:
-            self._update_agent(agent_id, "active")
-            self._create_session(agent_id, openclaw_session_id, datetime.now(timezone.utc).isoformat(), "openclaw")
-        elif etype == "session.completed":
+        if etype == "session.completed":
             self._update_agent(agent_id, "idle")
             self._complete_session(openclaw_session_id)
 
@@ -134,16 +149,48 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         except Exception:
             pass
 
-    def _create_session(self, agent_id: str, session_key: str, ts: str, source: str):
+    def _create_session(self, agent_id: str | None, session_ref: str, ts: str, source: str):
         async def _do():
             from app.storage.session_repo import session_repo
             from app.domain.models import Session
+
+            canonical_id, meta = _resolve_session_identity(session_ref)
+            session_key = meta.get("session_key") if isinstance(meta.get("session_key"), str) else canonical_id
+            session_id = meta.get("session_id") if isinstance(meta.get("session_id"), str) else None
+
+            resolved_agent_id = agent_id or _parse_session_key(session_key)
+            if not resolved_agent_id:
+                # Keep behavior safe: don't create orphan sessions without agent attribution.
+                return
+
+            # Idempotency guard across aliases (sessionKey and sessionId should map to one dashboard row).
+            alias_candidates = [v for v in {session_ref, canonical_id, session_key, session_id} if isinstance(v, str) and v]
+            existing = await session_repo.find_by_openclaw_refs(*alias_candidates)
+
+            source_kind, channel = _classify_session_source(source=source, session_key=session_key, meta=meta)
+            snapshot_update = {
+                "source": source,
+                "source_kind": source_kind,
+                "channel": channel,
+                "session_key": session_key,
+                "session_id": session_id,
+            }
+
+            if existing:
+                updates = {
+                    "openclaw_session_id": canonical_id,
+                    "status": "active",
+                    "context_snapshot": {**(existing.context_snapshot or {}), **{k: v for k, v in snapshot_update.items() if v is not None}},
+                }
+                await session_repo.update(existing.id, updates)
+                return
+
             session = Session(
-                agent_id=agent_id,
-                openclaw_session_id=session_key,
+                agent_id=resolved_agent_id,
+                openclaw_session_id=canonical_id,
                 status="active",
                 started_at=ts,
-                context_snapshot={"source": source, "session_key": session_key},
+                context_snapshot={k: v for k, v in snapshot_update.items() if v is not None},
             )
             await session_repo.create(session)
         try:
@@ -151,11 +198,18 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         except Exception:
             pass
 
-    def _complete_session(self, openclaw_session_id: str):
-        """Mark a session as completed in the session repo."""
+    def _complete_session(self, openclaw_session_ref: str):
+        """Mark a session as completed in the session repo (supports sessionKey/sessionId aliases)."""
         async def _do():
             from app.storage.session_repo import session_repo
-            session = await session_repo.find_by_openclaw_id(openclaw_session_id)
+
+            canonical_id, meta = _resolve_session_identity(openclaw_session_ref)
+            session_key = meta.get("session_key") if isinstance(meta.get("session_key"), str) else canonical_id
+            session_id = meta.get("session_id") if isinstance(meta.get("session_id"), str) else None
+            alias_candidates = [v for v in {openclaw_session_ref, canonical_id, session_key, session_id} if isinstance(v, str) and v]
+
+            session = await session_repo.find_by_openclaw_refs(*alias_candidates)
+
             if session:
                 await session_repo.update(session.id, {
                     "status": "completed",
@@ -214,11 +268,15 @@ class WorkspaceEventHandler(FileSystemEventHandler):
                 session_key = record.get("sessionKey", "")
                 ts = record.get("timestamp", datetime.now(timezone.utc).isoformat())
                 source = record.get("source", "")
-                agent_id = _parse_session_key(session_key)
+
+                canonical_id, meta = _resolve_session_identity(session_key)
+                resolved_session_key = meta.get("session_key") if isinstance(meta.get("session_key"), str) else canonical_id
+                agent_id = _parse_session_key(resolved_session_key) or _parse_session_key(session_key)
 
                 if action in ("new", "reset", "resume"):
-                    etype = "session.started" if action == "new" else "session.completed"
-                    title = f"Session {action}: {session_key}"
+                    # "resume" re-opens/continues a session; treat it as started, not completed.
+                    etype = "session.completed" if action == "reset" else "session.started"
+                    title = f"Session {action}: {resolved_session_key}"
                     print(f"[file_watcher] {etype}: agent={agent_id} source={source}")
 
                     event_id = f"evt_cmd_{datetime.now(timezone.utc).timestamp():.6f}".replace(".", "_")
@@ -229,7 +287,9 @@ class WorkspaceEventHandler(FileSystemEventHandler):
                         "source": "watcher",
                         "title": title,
                         "data": {
-                            "session_key": session_key,
+                            "session_key": resolved_session_key,
+                            "session_ref": session_key,
+                            "session_id": meta.get("session_id"),
                             "action": action,
                             "sender_id": record.get("senderId"),
                             "channel": source,
@@ -238,10 +298,10 @@ class WorkspaceEventHandler(FileSystemEventHandler):
                     })
 
                     if agent_id:
-                        if action == "new":
+                        if action in ("new", "resume"):
                             self._update_agent(agent_id, "active")
                             self._create_session(agent_id, session_key, ts, source)
-                        elif action in ("reset", "resume"):
+                        elif action == "reset":
                             self._update_agent(agent_id, "idle")
                             self._complete_session(session_key)
 
@@ -285,10 +345,24 @@ class WorkspaceEventHandler(FileSystemEventHandler):
 
         # Build event data — include diff for text files
         event_data_payload: dict = {"path": path}
-        if p.suffix in (".md", ".json", ".txt", ".py") and event_type == "file.updated":
+        text_like = p.suffix in (".md", ".json", ".txt", ".py")
+
+        # Keep an initial baseline on create to avoid duplicate create+modify "updated" events
+        if text_like and event_type == "file.created":
+            try:
+                _file_snapshots[path] = p.read_text(encoding="utf-8", errors="ignore")[:6000]
+            except Exception:
+                pass
+
+        if text_like and event_type == "file.updated":
             try:
                 current = p.read_text(encoding="utf-8", errors="ignore")[:6000]
                 prev = _file_snapshots.get(path)
+
+                # Guard: if content is identical, treat this as metadata/access noise and skip
+                if prev is not None and prev == current:
+                    return
+
                 if prev is not None:
                     import difflib
                     diff_lines = list(difflib.unified_diff(
@@ -344,7 +418,9 @@ def _reconcile_stale_active_sessions(openclaw_dir: str, loop):
 
 def start_file_watcher(event_bus, workspace_path: str, openclaw_dir: str = None, loop=None):
     """Start the watchdog observer."""
-    global _observer, _loop, _commands_log_offset
+    global _observer, _loop, _commands_log_offset, _OPENCLAW_DIR
+
+    _OPENCLAW_DIR = openclaw_dir
 
     _loop = loop
     if _loop is None:

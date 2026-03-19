@@ -83,6 +83,24 @@ export function AgentsPage() {
                   </div>
                 )}
 
+                {/* Current session presence */}
+                {agent.current_session_id && (
+                  <div className="text-xs text-gray-400 space-y-1">
+                    <div>
+                      <span className="text-gray-500">Session: </span>
+                      <span className="font-mono text-green-300">{agent.current_session_id}</span>
+                    </div>
+                    {agent.current_session_context?.channel && (
+                      <div>
+                        <span className="text-gray-500">Context: </span>
+                        <span className="text-gray-300">
+                          {(agent.current_session_context.source_kind ?? 'channel')}:{agent.current_session_context.channel}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Last active */}
                 <div className="flex items-center gap-1 text-xs text-gray-500">
                   <Clock className="h-3 w-3" />

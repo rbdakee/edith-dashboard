@@ -6,6 +6,7 @@ from app.storage.session_repo import session_repo
 from app.services.session_service import create_session
 from app.services.openclaw_session_truth import reconcile_sessions_with_openclaw_truth
 from app.config import settings
+from app.services.main_session_presence import is_current_main_telegram_session
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -27,7 +28,14 @@ async def list_sessions(
         status=status,
         limit=limit,
     )
-    return [s.model_dump(mode="json") for s in sessions]
+
+    # Keep all session semantics intact, but hide only the currently open
+    # main direct Telegram session from Sessions API consumers.
+    filtered_sessions = [
+        s for s in sessions
+        if not (s.status == "active" and is_current_main_telegram_session(s))
+    ]
+    return [s.model_dump(mode="json") for s in filtered_sessions]
 
 
 @router.post("/", status_code=201)

@@ -9,8 +9,8 @@ import { TimestampLabel } from '@/components/shared/TimestampLabel';
 import { MarkdownRenderer } from '@/components/shared/MarkdownRenderer';
 import { ApproveButton } from '@/components/shared/ApproveButton';
 import { PlanEditor } from './PlanEditor';
-import { SubTaskCard } from './SubTaskCard';
 import { SubTaskCreateButton } from './SubTaskCreateButton';
+import { SubTaskList } from './SubTaskList';
 import { CommentThread } from '@/components/comments/CommentThread';
 import { eventsApi } from '@/api/events';
 import { sessionsApi } from '@/api/sessions';
@@ -151,14 +151,16 @@ export function TaskDetailPanel({ task, onClose }: TaskDetailPanelProps) {
             </TabsContent>
 
             <TabsContent value="subtasks">
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <SubTaskCreateButton parentTaskId={task.id} />
                 {subtasks.length === 0 ? (
                   <div className="text-center py-6 text-gray-500 text-sm">No sub-tasks yet</div>
                 ) : (
-                  subtasks.map((sub) => (
-                    <SubTaskCard key={sub.id} task={sub} onClick={() => setSelectedSubTask(sub)} />
-                  ))
+                  <SubTaskList
+                    tasks={subtasks}
+                    onTaskClick={setSelectedSubTask}
+                    queryKey={['tasks', { parent_task_id: task.id }]}
+                  />
                 )}
               </div>
               {selectedSubTask && (

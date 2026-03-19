@@ -5,7 +5,6 @@ export const AGENT_COLORS: Record<string, string> = {
   'edith-dev': 'bg-blue-500/20 text-blue-300 border-blue-500/30',
   'edith-routine': 'bg-green-500/20 text-green-300 border-green-500/30',
   'edith-analytics': 'bg-orange-500/20 text-orange-300 border-orange-500/30',
-  'edith-orchestrator': 'bg-violet-500/20 text-violet-300 border-violet-500/30',
 };
 
 export const AGENT_DOT_COLORS: Record<string, string> = {
@@ -13,7 +12,6 @@ export const AGENT_DOT_COLORS: Record<string, string> = {
   'edith-dev': 'bg-blue-400',
   'edith-routine': 'bg-green-400',
   'edith-analytics': 'bg-orange-400',
-  'edith-orchestrator': 'bg-violet-400',
 };
 
 export const STATUS_COLORS: Record<TaskStatus, string> = {
@@ -62,12 +60,8 @@ export const SUB_STATUS_COLORS: Record<string, string> = {
   updating: 'bg-teal-500/20 text-teal-300',
 };
 
-export const AGENTS = [
-  { id: 'main', name: 'E.D.I.T.H.', model: 'gpt-5.4', skills: ['orchestrator', 'memory-manager', 'activity-logger'] },
-  { id: 'edith-dev', name: 'E.D.I.T.H. Dev', model: 'gpt-5.3-codex', skills: ['backend-dev', 'frontend-dev', 'designer', 'project-planner', 'autonomous-builder', 'git-manager'] },
-  { id: 'edith-routine', name: 'E.D.I.T.H. Routine', model: 'gpt-5.1-codex-mini', skills: ['task-manager', 'notion-task-manager', 'notion-finance-analyst', 'notion-fitness-analyst', 'prayer-times'] },
-  { id: 'edith-analytics', name: 'E.D.I.T.H. Analytics', model: 'gpt-5.1-codex-mini', skills: ['data-analytics'] },
-];
+// AGENTS constant removed — agent list is now dynamic from backend API via agentStore.
+// Use useAgentStore().agents instead of this static list.
 
 export const EVENT_TYPE_COLORS: Record<string, string> = {
   'task.created': 'text-blue-400',
