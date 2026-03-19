@@ -24,6 +24,9 @@ _commands_log_offset: int = 0
 # In-memory snapshots for file diff computation: path → last known content
 _file_snapshots: dict[str, str] = {}
 
+# If a session file has no .lock and has been quiet for this long, treat as finished.
+_SESSION_STALE_SECONDS = 30
+
 
 def _parse_session_key(session_key: str) -> str | None:
     """Extract agent_id from sessionKey like 'agent:main:telegram:direct:893220231'."""
@@ -71,7 +74,18 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         elif is_new:
             etype = "session.started"
         else:
-            return  # ignore plain modifications
+            # Heuristic for sessions that finish without .deleted/.reset rename:
+            # if .jsonl has no lock and hasn't changed for a short grace period,
+            # mark it as completed.
+            lock_path = p.with_name(f"{openclaw_session_id}.jsonl.lock")
+            try:
+                age_seconds = (datetime.now(timezone.utc) - datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)).total_seconds()
+            except Exception:
+                age_seconds = 0
+            if (not lock_path.exists()) and age_seconds >= _SESSION_STALE_SECONDS:
+                etype = "session.completed"
+            else:
+                return  # ignore plain modifications while session is active
 
         title = f"Session {etype.split('.')[1]}: {agent_id}"
         print(f"[file_watcher] {etype}: agent={agent_id} session={openclaw_session_id}")
@@ -89,7 +103,7 @@ class WorkspaceEventHandler(FileSystemEventHandler):
         if is_new:
             self._update_agent(agent_id, "active")
             self._create_session(agent_id, openclaw_session_id, datetime.now(timezone.utc).isoformat(), "openclaw")
-        elif is_deleted:
+        elif etype == "session.completed":
             self._update_agent(agent_id, "idle")
             self._complete_session(openclaw_session_id)
 
@@ -307,6 +321,27 @@ class WorkspaceEventHandler(FileSystemEventHandler):
             self._register_artifact(path)
 
 
+def _reconcile_stale_active_sessions(openclaw_dir: str, loop):
+    """One-shot reconciliation on startup against real OpenClaw lock/session truth."""
+
+    async def _do():
+        from app.services.openclaw_session_truth import reconcile_sessions_with_openclaw_truth
+
+        try:
+            stats = await reconcile_sessions_with_openclaw_truth(
+                openclaw_dir=openclaw_dir,
+                stale_seconds=_SESSION_STALE_SECONDS,
+            )
+            print(f"[file_watcher] startup reconcile: {stats}")
+        except Exception as e:
+            print(f"[file_watcher] startup reconcile error: {e}")
+
+    try:
+        asyncio.run_coroutine_threadsafe(_do(), loop)
+    except Exception:
+        pass
+
+
 def start_file_watcher(event_bus, workspace_path: str, openclaw_dir: str = None, loop=None):
     """Start the watchdog observer."""
     global _observer, _loop, _commands_log_offset
@@ -365,6 +400,9 @@ def start_file_watcher(event_bus, workspace_path: str, openclaw_dir: str = None,
         print("[file_watcher] Observer started.")
     except Exception as e:
         print(f"[file_watcher] Could not start observer: {e}")
+
+    if openclaw_dir:
+        _reconcile_stale_active_sessions(openclaw_dir, _loop)
 
 
 def stop_file_watcher():

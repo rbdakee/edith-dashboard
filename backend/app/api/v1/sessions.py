@@ -4,6 +4,8 @@ from app.core.deps import get_current_user
 from app.domain.models import Session, SessionCreate, SessionUpdate
 from app.storage.session_repo import session_repo
 from app.services.session_service import create_session
+from app.services.openclaw_session_truth import reconcile_sessions_with_openclaw_truth
+from app.config import settings
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -16,6 +18,9 @@ async def list_sessions(
     limit: int = Query(50, le=200),
     _user: str = Depends(get_current_user),
 ):
+    # Keep dashboard view close to real OpenClaw state on every list call.
+    await reconcile_sessions_with_openclaw_truth(settings.openclaw_dir, stale_seconds=30)
+
     sessions = await session_repo.list(
         agent_id=agent_id,
         task_id=task_id,

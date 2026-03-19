@@ -21,7 +21,12 @@ async def lifespan(app: FastAPI):
     # Pass running loop explicitly so watchdog thread can schedule coroutines correctly
     loop = asyncio.get_running_loop()
     start_file_watcher(event_bus, settings.openclaw_workspace, openclaw_dir=settings.openclaw_dir, loop=loop)
-    start_gateway_poller(event_bus, settings.openclaw_gateway_url, settings.openclaw_gateway_token)
+    start_gateway_poller(
+        event_bus,
+        settings.openclaw_gateway_url,
+        settings.openclaw_gateway_token,
+        settings.openclaw_dir,
+    )
     yield
     # Shutdown
     stop_file_watcher()

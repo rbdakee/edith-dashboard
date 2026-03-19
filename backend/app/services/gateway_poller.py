@@ -1,70 +1,40 @@
 """
-Gateway poller: polls OpenClaw gateway at :18789 every 10s for agent/session state.
-"""
-import asyncio
-from datetime import datetime, timezone
+Background poller for periodic OpenClaw truth reconciliation.
 
-import httpx
+Historically this module polled guessed gateway HTTP endpoints (/api/agents, /api/sessions),
+which may not exist and produced stale state. Now it reconciles sessions directly from
+local OpenClaw session lock/files truth.
+"""
+
+from __future__ import annotations
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 _scheduler: AsyncIOScheduler | None = None
-_event_bus = None
-_gateway_url: str = ""
-_gateway_token: str = ""
+_openclaw_dir: str = ""
 
 
 async def _poll_gateway():
-    if not _gateway_url or not _gateway_token:
+    if not _openclaw_dir:
         return
 
-    headers = {
-        "Authorization": f"Bearer {_gateway_token}",
-        "Content-Type": "application/json",
-    }
+    from app.services.openclaw_session_truth import reconcile_sessions_with_openclaw_truth
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            # Poll agents
-            try:
-                resp = await client.get(f"{_gateway_url}/api/agents", headers=headers)
-                if resp.status_code == 200:
-                    agents = resp.json()
-                    if _event_bus:
-                        await _event_bus.publish({
-                            "type": "agent.status_changed",
-                            "source": "gateway",
-                            "title": "Agent state polled",
-                            "data": {"agents": agents},
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
-            except Exception:
-                pass
-
-            # Poll active sessions
-            try:
-                resp = await client.get(f"{_gateway_url}/api/sessions", headers=headers)
-                if resp.status_code == 200:
-                    sessions = resp.json()
-                    if _event_bus and sessions:
-                        await _event_bus.publish({
-                            "type": "session.started",
-                            "source": "gateway",
-                            "title": f"{len(sessions)} active session(s)",
-                            "data": {"sessions": sessions},
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
-            except Exception:
-                pass
-
+        stats = await reconcile_sessions_with_openclaw_truth(
+            openclaw_dir=_openclaw_dir,
+            stale_seconds=30,
+        )
+        if stats.get("closed"):
+            print(f"[gateway_poller] reconciled sessions: {stats}")
     except Exception as e:
-        pass  # Gateway might be offline; that's fine
+        print(f"[gateway_poller] reconcile error: {e}")
 
 
-def start_gateway_poller(event_bus, gateway_url: str, gateway_token: str):
-    global _scheduler, _event_bus, _gateway_url, _gateway_token
-    _event_bus = event_bus
-    _gateway_url = gateway_url
-    _gateway_token = gateway_token
+def start_gateway_poller(event_bus, gateway_url: str, gateway_token: str, openclaw_dir: str):
+    # event_bus/gateway_url/gateway_token kept in signature for backward compatibility
+    global _scheduler, _openclaw_dir
+    _openclaw_dir = openclaw_dir
 
     _scheduler = AsyncIOScheduler()
     _scheduler.add_job(_poll_gateway, "interval", seconds=10, id="gateway_poll")

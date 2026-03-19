@@ -47,11 +47,26 @@ class SessionRepository:
 
     async def get(self, session_id: str) -> Session | None:
         self._load_index()
+        path = self._session_path(session_id)
+
+        # Disk is the source of truth. If file is gone, drop stale in-memory/index entries.
+        if not path.exists():
+            self._cache.pop(session_id, None)
+            if self._index.pop(session_id, None) is not None:
+                self._save_index()
+            return None
+
         if session_id in self._cache:
             return Session(**self._cache[session_id])
-        raw = read_json(self._session_path(session_id))
+
+        raw = read_json(path)
         if raw is None:
+            # Corrupt/unreadable file: clean dangling index/cache entry.
+            self._cache.pop(session_id, None)
+            if self._index.pop(session_id, None) is not None:
+                self._save_index()
             return None
+
         self._cache[session_id] = raw
         return Session(**raw)
 
